@@ -20,6 +20,7 @@ import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.Date;
 import java.util.List;
+import java.util.Optional;
 
 @Controller
 @RequestMapping("/students")
@@ -35,44 +36,65 @@ public class StudentsController {
         return "students/index";
     }
 
-    @GetMapping({"/create"})
+    @GetMapping("/search")
+    public String searchStudents(
+            @RequestParam("searchCategory") String searchCategory,
+            @RequestParam("query") Optional<String> query,
+            Model model) {
+
+        if (query.isEmpty() || query.get().isEmpty()) {
+            return "redirect:/students";
+        }
+
+        List<Student> students;
+        switch (searchCategory) {
+            case "id":
+                students = repo.findById(Integer.parseInt(query.get())).stream().toList();
+                break;
+            case "name":
+                students = repo.findByNameContainingIgnoreCase(query.get());
+                break;
+            case "idno":
+                students = repo.findByIdnoContainingIgnoreCase(query.get());
+                break;
+            default:
+                students = repo.findAll(Sort.by(Sort.Direction.DESC, "id"));
+                break;
+        }
+        model.addAttribute("students", students);
+        return "students/index";
+    }
+
+    @GetMapping("/create")
     public String showCreatePage(Model model) {
         StudentDto studentDto = new StudentDto();
         model.addAttribute("studentDto", studentDto);
         return "students/CreateStudent";
     }
 
+    @GetMapping("/validateIdno")
+    @ResponseBody
+    public boolean validateIdno(@RequestParam String idno, @RequestParam Optional<Integer> id) {
+        if (id.isPresent()) {
+            Student student = repo.findById(id.get()).orElse(null);
+            if (student != null && student.getIdno().equals(idno)) {
+                return false; // The same ID number belongs to the current student
+            }
+        }
+        return repo.existsByIdno(idno);
+    }
+
     @PostMapping("/create")
-    public String CreateStudent(
+    public String createStudent(
             @Valid @ModelAttribute StudentDto studentDto,
             BindingResult result
-    ){
-        if  (studentDto.getImageFileName().isEmpty()){
-            result.addError(new FieldError("studentDto","ImageFileName","The image file is required"));
+    ) {
+        if (repo.existsByIdno(studentDto.getIdno())) {
+            result.addError(new FieldError("studentDto", "idno", "This ID number is already used."));
         }
 
-        if (result.hasErrors()){
+        if (result.hasErrors()) {
             return "students/CreateStudent";
-        }
-
-        //save image file
-        MultipartFile image = studentDto.getImageFileName();
-        Date regAt = new Date();
-        String storageFileName = regAt.getTime() + "_" + image.getOriginalFilename();
-
-        try{
-            String uploadDir = "public/images/";
-            Path uploadPath = Paths.get(uploadDir);
-
-            if (!Files.exists(uploadPath)){
-                Files.createDirectories(uploadPath);
-            }
-            try (InputStream inputStream = image.getInputStream()){
-                Files.copy(inputStream, Paths.get(uploadDir + storageFileName),
-                        StandardCopyOption.REPLACE_EXISTING);
-            }
-        } catch (Exception ex) {
-            System.out.println("Exception: " + ex.getMessage());
         }
 
         Student student = new Student();
@@ -80,8 +102,31 @@ public class StudentsController {
         student.setIdno(studentDto.getIdno());
         student.setAge(studentDto.getAge());
         student.setGender(studentDto.getGender());
-        student.setImageFileName(storageFileName);
+        Date regAt = new Date();
         student.setRegAt(regAt);
+
+        // save image file if present
+        MultipartFile image = studentDto.getImageFileName();
+        if (image != null && !image.isEmpty()) {
+            String storageFileName = regAt.getTime() + "_" + image.getOriginalFilename();
+            try {
+                String uploadDir = "public/images/";
+                Path uploadPath = Paths.get(uploadDir);
+
+                if (!Files.exists(uploadPath)) {
+                    Files.createDirectories(uploadPath);
+                }
+                try (InputStream inputStream = image.getInputStream()) {
+                    Files.copy(inputStream, Paths.get(uploadDir + storageFileName),
+                            StandardCopyOption.REPLACE_EXISTING);
+                }
+                student.setImageFileName(storageFileName);
+            } catch (Exception ex) {
+                System.out.println("Exception: " + ex.getMessage());
+            }
+        } else {
+            student.setImageFileName(null);
+        }
 
         repo.save(student);
 
@@ -92,11 +137,10 @@ public class StudentsController {
     public String showEditPage(
             Model model,
             @RequestParam int id
-    ){
-
+    ) {
         try {
             Student student = repo.findById(id).get();
-            model.addAttribute("student",student);
+            model.addAttribute("student", student);
 
             StudentDto studentDto = new StudentDto();
             studentDto.setName(student.getName());
@@ -106,8 +150,7 @@ public class StudentsController {
 
             model.addAttribute("studentDto", studentDto);
 
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             System.out.println("Exception: " + ex.getMessage());
             return "redirect:/students";
         }
@@ -120,7 +163,7 @@ public class StudentsController {
             @RequestParam int id,
             @Valid @ModelAttribute StudentDto studentDto,
             BindingResult result
-    ){
+    ) {
         try {
             Student student = repo.findById(id).get();
             model.addAttribute("student", student);
@@ -129,19 +172,23 @@ public class StudentsController {
                 return "students/EditStudent";
             }
 
-            if (!studentDto.getImageFileName().isEmpty()){
-                //delete old image
+            if (repo.existsByIdno(studentDto.getIdno()) && !student.getIdno().equals(studentDto.getIdno())) {
+                result.addError(new FieldError("studentDto", "idno", "This ID number is already used."));
+                return "students/EditStudent";
+            }
+
+            if (!studentDto.getImageFileName().isEmpty()) {
+                // delete old image
                 String uploadDir = "public/images/";
                 Path oldImagePath = Paths.get(uploadDir + student.getImageFileName());
 
-                try{
+                try {
                     Files.delete(oldImagePath);
-                }
-                catch (Exception ex){
+                } catch (Exception ex) {
                     System.out.println("Exception: " + ex.getMessage());
                 }
 
-                //save new image file
+                // save new image file
                 MultipartFile image = studentDto.getImageFileName();
                 Date createdAt = new Date();
                 String storageFileName = createdAt.getTime() + "_" + image.getOriginalFilename();
@@ -160,8 +207,7 @@ public class StudentsController {
 
             repo.save(student);
 
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             System.out.println("Exception: " + ex.getMessage());
         }
 
@@ -169,29 +215,26 @@ public class StudentsController {
     }
 
     @GetMapping("/delete")
-    public String deleteStudent(@RequestParam int id){
-        try{
+    public String deleteStudent(@RequestParam int id) {
+        try {
             Student student = repo.findById(id).get();
 
-            //delete student image
-            Path imagePath = Paths.get("public/images/" + student.getImageFileName());
-
-            try{
-                Files.delete(imagePath);
+            // delete student image if exists
+            if (student.getImageFileName() != null) {
+                Path imagePath = Paths.get("public/images/" + student.getImageFileName());
+                try {
+                    Files.delete(imagePath);
+                } catch (Exception ex) {
+                    System.out.println("Exception: " + ex.getMessage());
+                }
             }
-            catch (Exception ex) {
-                System.out.println("Exception: " + ex.getMessage());
-            }
 
-            //delete student
+            // delete student
             repo.delete(student);
 
-        }
-        catch (Exception ex) {
+        } catch (Exception ex) {
             System.out.println("Exception: " + ex.getMessage());
         }
         return "redirect:/students";
     }
-
-
 }
